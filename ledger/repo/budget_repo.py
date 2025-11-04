@@ -1,11 +1,10 @@
-"""Budget repository skeleton."""
 from __future__ import annotations
 from typing import Iterable
 from ..models import Budget
 
-class BudgetRepository:
-    def add(self, budget: Budget) -> Budget:
-        raise NotImplementedError
 
-    def list_by_user(self, user_id: int) -> Iterable[Budget]:
-        raise NotImplementedError
+class BudgetRepository:
+    def add(self, budget: Budget) -> Budget: ...
+    def list_by_user(self, user_id: int) -> Iterable[Budget]: ...
+    def get_by_category(self, user_id: int, category: str) -> Budget | None: ...
+    def update_limit(self, budget_id: int, monthly_limit: float) -> None: ...

@@ -1,6 +1,8 @@
 """Budget entity."""
+
 from __future__ import annotations
 from dataclasses import dataclass
+
 
 @dataclass(slots=True)
 class Budget:
@@ -8,3 +10,4 @@ class Budget:
     user_id: int
     category: str
     monthly_limit: float
+    period: str = "MONTHLY"

@@ -1,5 +1,3 @@
-"""Database utilities: create engine and session factory."""
-
 from __future__ import annotations
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,7 +8,6 @@ _SESSION_FACTORY = None
 
 
 def get_engine(db_url: str = "sqlite:///./ledger.db"):
-    """Return a cached SQLAlchemy engine."""
     global _ENGINE
     if _ENGINE is None:
         _ENGINE = create_engine(db_url, echo=False, future=True)
@@ -18,7 +15,6 @@ def get_engine(db_url: str = "sqlite:///./ledger.db"):
 
 
 def get_session_factory(db_url: str = "sqlite:///./ledger.db"):
-    """Return a cached session factory bound to the engine."""
     global _SESSION_FACTORY
     if _SESSION_FACTORY is None:
         engine = get_engine(db_url)
@@ -29,7 +25,5 @@ def get_session_factory(db_url: str = "sqlite:///./ledger.db"):
 
 
 def init_db(db_url: str = "sqlite:///./ledger.db") -> None:
-    """Create all tables if they do not exist."""
-
     engine = get_engine(db_url)
     metadata.create_all(engine)
