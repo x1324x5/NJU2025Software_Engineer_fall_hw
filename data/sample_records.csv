@@ -1,0 +1,4 @@
+# user_id,rtype,category,amount,occurred_on,note
+1,INCOME,salary,1000.0,2025-01-01,January salary
+1,EXPENSE,food,200.0,2025-01-02,lunch
+1,EXPENSE,transport,50.0,2025-01-03,bus

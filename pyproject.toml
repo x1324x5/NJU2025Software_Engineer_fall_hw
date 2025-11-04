@@ -1,0 +1,6 @@
+[tool.pylint.'MESSAGES CONTROL']
+disable = ["C0114", "C0115", "C0116"]  # allow missing module/class/func docstring during bootstrap
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
