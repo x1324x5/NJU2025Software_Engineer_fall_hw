@@ -2,6 +2,7 @@ from datetime import date
 from ledger.models import Record, RecordType
 from ledger.services.statistics_service import StatisticsService
 
+
 def test_monthly_summary():
     svc = StatisticsService()
     records = [
@@ -12,3 +13,7 @@ def test_monthly_summary():
     assert out["income"] == 1000.0
     assert out["expense"] == 200.0
     assert out["balance"] == 800.0
+
+
+def test2():
+    pass
