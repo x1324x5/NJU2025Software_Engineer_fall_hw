@@ -1,12 +1,14 @@
-"""SQLite-backed RecordRepository implementation using SQLAlchemy Core."""
+# ledger/repo/sqlite_record_repo.py
 from __future__ import annotations
 from typing import Iterable
 from datetime import date
+from calendar import monthrange
 from sqlalchemy import select, insert, and_, or_
 from sqlalchemy.orm import Session
 from .record_repo import RecordRepository
 from .sqlite_schema import records
 from ..models import Record, RecordType
+
 
 class SqliteRecordRepository(RecordRepository):
     def __init__(self, session: Session):
@@ -21,8 +23,8 @@ class SqliteRecordRepository(RecordRepository):
             occurred_on=record.occurred_on,
             note=record.note or "",
         )
-        result = self._session.execute(stmt)
-        pk = result.inserted_primary_key[0]
+        res = self._session.execute(stmt)
+        pk = res.inserted_primary_key[0]
         self._session.commit()
         return Record(
             record_id=int(pk),
@@ -83,10 +85,7 @@ class SqliteRecordRepository(RecordRepository):
             .where(
                 and_(
                     records.c.user_id == user_id,
-                    or_(
-                        records.c.category.like(like),
-                        records.c.note.like(like),
-                    ),
+                    or_(records.c.category.like(like), records.c.note.like(like)),
                 )
             )
             .order_by(records.c.occurred_on.desc(), records.c.record_id.desc())
@@ -104,3 +103,13 @@ class SqliteRecordRepository(RecordRepository):
             )
             for row in rows
         ]
+
+    # 新增：测试会调用它
+    def list_month(self, user_id: int, year: int, month: int) -> Iterable[Record]:
+        # [start, end) 语义：end 为下月一号
+        start = date(year, month, 1)
+        if month == 12:
+            end = date(year + 1, 1, 1)
+        else:
+            end = date(year, month + 1, 1)
+        return self.list_by_period(user_id, start, end)

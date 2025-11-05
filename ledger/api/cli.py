@@ -1,20 +1,9 @@
 """
-Ledger CLI: records + budgets + reminders.
-
-Examples:
-  python -m ledger.api.cli init-db --db ./ledger.db
-  # record
-  python -m ledger.api.cli add --user alice --type EXPENSE --category food --amount 25.5 --date 2025-01-02 --note lunch
-  python -m ledger.api.cli list --user alice --month 2025-01
-  python -m ledger.api.cli stats --user alice --month 2025-01 --plot
-  # budget
-  python -m ledger.api.cli budget set --user alice --category food --limit 1000
-  python -m ledger.api.cli budget list --user alice
-  python -m ledger.api.cli budget progress --user alice --month 2025-01
-  # reminder
-  python -m ledger.api.cli reminder set --user alice --time 21:00 --message "记个账" --enabled
-  python -m ledger.api.cli reminder list --user alice
-  python -m ledger.api.cli reminder emit --user alice
+Ledger CLI with authentication.
+- 支持：register/login/logout/whoami/change-password
+- 记录：add/list/stats/import-csv/export-csv（需已登录）
+- 预算：budget set/list/progress（需已登录）
+- 提醒：reminder set/list/emit（需已登录）
 """
 
 from __future__ import annotations
@@ -25,7 +14,7 @@ from datetime import date, datetime, time
 from typing import Iterable, Tuple
 
 try:
-    import matplotlib.pyplot as plt  # used only when --plot flag is set
+    import matplotlib.pyplot as plt  # 仅在 --plot 时使用
 except Exception:  # pragma: no cover
     plt = None
 
@@ -38,8 +27,9 @@ from ..services.statistics_service import StatisticsService
 from ..services.record_service import RecordService
 from ..services.budget_service import BudgetService
 from ..services.reminder_service import ReminderService
+from ..utils.auth import save_session, load_session, clear_session, SessionData
 
-# csv io (user implemented)
+# csv io
 try:
     from ..utils.csv_io import load_records_from_csv, save_records_to_csv
 except Exception:  # pragma: no cover
@@ -66,23 +56,76 @@ def _get_session(db_url: str):
     return SessionFactory()
 
 
-def _get_or_create_user(session, name: str) -> User:
+def _require_login(db_url: str) -> SessionData:
+    sess = load_session()
+    if not sess:
+        raise SystemExit(
+            "not logged in. run: python -m ledger.api.cli login --db <url> --username <name> --password <pw>"
+        )
+    if sess.db != db_url:
+        raise SystemExit(
+            f"logged in for a different DB: {sess.db}. please login again with --db {db_url}."
+        )
+    return sess
+
+
+def _get_current_user(session, username: str) -> User:
     urepo = SqliteUserRepository(session)
-    user = urepo.get_by_name(name)
-    if user is None:
-        user = urepo.add(User(None, name, None))
+    user = urepo.get_by_name(username)
+    if not user:
+        raise SystemExit("current user not found. please register/login again.")
     return user
 
 
-# ---------- core commands ----------
-def cmd_init_db(args: argparse.Namespace) -> None:
-    init_db(db_url=args.db)
-    print(f"Initialized database at {args.db}")
-
-
-def cmd_add(args: argparse.Namespace) -> None:
+# ---------- auth commands ----------
+def cmd_register(args: argparse.Namespace) -> None:
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
+    urepo = SqliteUserRepository(session)
+    try:
+        u = urepo.register(args.username, args.password, args.email)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    print(f"registered user: {u.name} (id={u.user_id})")
+
+
+def cmd_login(args: argparse.Namespace) -> None:
+    session = _get_session(args.db)
+    urepo = SqliteUserRepository(session)
+    user = urepo.verify_login(args.username, args.password)
+    if not user:
+        raise SystemExit("invalid username or password")
+    save_session(args.db, args.username)
+    print(f"login ok: {args.username}")
+
+
+def cmd_logout(args: argparse.Namespace) -> None:
+    clear_session()
+    print("logged out.")
+
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    sess = load_session()
+    if not sess:
+        print("not logged in")
+    else:
+        print(f"user={sess.user} db={sess.db}")
+
+
+def cmd_change_password(args: argparse.Namespace) -> None:
+    sess = _require_login(args.db)
+    session = _get_session(args.db)
+    urepo = SqliteUserRepository(session)
+    ok = urepo.change_password(sess.user, args.old, args.new)
+    if not ok:
+        raise SystemExit("old password incorrect or user missing")
+    print("password changed.")
+
+
+# ---------- record commands (login required) ----------
+def cmd_add(args: argparse.Namespace) -> None:
+    sess = _require_login(args.db)
+    session = _get_session(args.db)
+    user = _get_current_user(session, sess.user)
     repo = SqliteRecordRepository(session)
     svc = RecordService(repo)
     r = Record(
@@ -101,19 +144,18 @@ def cmd_add(args: argparse.Namespace) -> None:
     )
 
 
-def _iter_month_records(
-    session, user_name: str, year: int, month: int
-) -> Iterable[Record]:
-    user = _get_or_create_user(session, user_name)
+def _iter_month_records(session, user: User, year: int, month: int) -> Iterable[Record]:
     repo = SqliteRecordRepository(session)
     svc = RecordService(repo)
     return svc.list_month(user.user_id, year, month)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
+    sess = _require_login(args.db)
     session = _get_session(args.db)
+    user = _get_current_user(session, sess.user)
     year, month = _parse_month(args.month)
-    recs = list(_iter_month_records(session, args.user, year, month))
+    recs = list(_iter_month_records(session, user, year, month))
     if not recs:
         print("no records")
         return
@@ -125,14 +167,16 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_stats(args: argparse.Namespace) -> None:
+    sess = _require_login(args.db)
     session = _get_session(args.db)
+    user = _get_current_user(session, sess.user)
     year, month = _parse_month(args.month)
-    recs = list(_iter_month_records(session, args.user, year, month))
+    recs = list(_iter_month_records(session, user, year, month))
     svc = StatisticsService()
     summary = svc.monthly_summary(recs)
     by_cat = svc.by_category(recs)
 
-    print(f"Summary for {args.user} {year}-{month:02d}")
+    print(f"Summary for {user.name} {year}-{month:02d}")
     print(f"  income : {summary['income']:.2f}")
     print(f"  expense: {summary['expense']:.2f}")
     print(f"  balance: {summary['balance']:.2f}")
@@ -142,20 +186,15 @@ def cmd_stats(args: argparse.Namespace) -> None:
             print(f"    {k}: {v:.2f}")
 
     if args.plot:
-        if plt is None:
-            print("matplotlib is not available; cannot plot.")
-            return
         reports_dir = Path(args.reports_dir or "reports")
         _ensure_reports_dir(reports_dir)
-        # Pie chart (categories of expenses)
         labels = list(by_cat.keys())
         values = list(by_cat.values())
         if values:
             import matplotlib.pyplot as plt  # ensure available in function scope
 
             plt.figure()
-            # NOTE: do not set specific colors to follow the assignment plotting rules.
-            plt.pie(values, labels=labels, autopct="%1.1f%%")
+            plt.pie(values, labels=labels, autopct="%1.1f%%")  # 不显式设置颜色
             out = reports_dir / f"expenses_by_category_{year}-{month:02d}.png"
             plt.title(f"Expenses by Category {year}-{month:02d}")
             plt.savefig(out, bbox_inches="tight")
@@ -163,13 +202,13 @@ def cmd_stats(args: argparse.Namespace) -> None:
             print(f"saved plot: {out}")
 
 
-# ---------- budgets ----------
+# ---------- budgets (login required) ----------
 def cmd_budget_set(args: argparse.Namespace) -> None:
     from sqlalchemy import insert
 
+    sess = _require_login(args.db)
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
-    # upsert-like: remove existing (user, category) then insert
+    user = _get_current_user(session, sess.user)
     session.execute(
         budgets.delete().where(
             budgets.c.user_id == user.user_id, budgets.c.category == args.category
@@ -183,16 +222,15 @@ def cmd_budget_set(args: argparse.Namespace) -> None:
         )
     )
     session.commit()
-    print(
-        f"budget set: user={args.user} category={args.category} limit={float(args.limit):.2f}"
-    )
+    print(f"budget set: category={args.category} limit={float(args.limit):.2f}")
 
 
 def cmd_budget_list(args: argparse.Namespace) -> None:
     from sqlalchemy import select
 
+    sess = _require_login(args.db)
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
+    user = _get_current_user(session, sess.user)
     rows = session.execute(
         select(budgets.c.category, budgets.c.monthly_limit).where(
             budgets.c.user_id == user.user_id
@@ -208,10 +246,11 @@ def cmd_budget_list(args: argparse.Namespace) -> None:
 def cmd_budget_progress(args: argparse.Namespace) -> None:
     from sqlalchemy import select
 
+    sess = _require_login(args.db)
     session = _get_session(args.db)
+    user = _get_current_user(session, sess.user)
     year, month = _parse_month(args.month)
-    user = _get_or_create_user(session, args.user)
-    # read budgets
+
     b_rows = session.execute(
         select(budgets.c.category, budgets.c.monthly_limit).where(
             budgets.c.user_id == user.user_id
@@ -220,29 +259,29 @@ def cmd_budget_progress(args: argparse.Namespace) -> None:
     if not b_rows:
         print("no budgets")
         return
-    # list month's records
-    recs = list(_iter_month_records(session, args.user, year, month))
-    # map to domain objects
+
+    recs = list(_iter_month_records(session, user, year, month))
     b_objs = [
         Budget(None, user.user_id, row.category, float(row.monthly_limit))
         for row in b_rows
     ]
     svc = BudgetService()
-    prog = svc.progress(b_objs, recs)  # category -> ratio
-    print(f"Budget progress for {args.user} {year}-{month:02d}")
+    prog = svc.progress(b_objs, recs)
+    print(f"Budget progress for {user.name} {year}-{month:02d}")
     for cat in sorted(prog.keys()):
         ratio = prog[cat]
         pct = ratio * 100.0
-        flag = " !!" if ratio >= 0.8 else ""  # 80% warn threshold
+        flag = " !!" if ratio >= 0.8 else ""  # 80% 预警
         print(f"  {cat}: {pct:.1f}%{flag}")
 
 
-# ---------- reminders ----------
+# ---------- reminders (login required) ----------
 def cmd_reminder_set(args: argparse.Namespace) -> None:
     from sqlalchemy import insert
 
+    sess = _require_login(args.db)
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
+    user = _get_current_user(session, sess.user)
     at = time.fromisoformat(args.time)
     msg = args.message or "记账提醒"
     enabled = True if args.enabled else False if args.disable else True
@@ -258,8 +297,9 @@ def cmd_reminder_set(args: argparse.Namespace) -> None:
 def cmd_reminder_list(args: argparse.Namespace) -> None:
     from sqlalchemy import select
 
+    sess = _require_login(args.db)
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
+    user = _get_current_user(session, sess.user)
     rows = session.execute(
         select(
             reminders.c.reminder_id,
@@ -281,8 +321,9 @@ def cmd_reminder_list(args: argparse.Namespace) -> None:
 def cmd_reminder_emit(args: argparse.Namespace) -> None:
     from sqlalchemy import select
 
+    sess = _require_login(args.db)
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
+    user = _get_current_user(session, sess.user)
     rows = session.execute(
         select(reminders.c.message, reminders.c.at, reminders.c.enabled).where(
             reminders.c.user_id == user.user_id
@@ -291,15 +332,14 @@ def cmd_reminder_emit(args: argparse.Namespace) -> None:
     enabled_rows = [r for r in rows if r.enabled]
     svc = ReminderService()
     r_objs = [Reminder(None, user.user_id, r.message, r.at, True) for r in enabled_rows]
-    svc.emit(r_objs)  # prints reminders
+    svc.emit(r_objs)
 
 
-# ---------- CSV ----------
+# ---------- CSV (login required) ----------
 def cmd_import_csv(args: argparse.Namespace) -> None:
-    if load_records_from_csv is None:
-        raise SystemExit("csv io module not found. Please implement utils/csv_io.py")
+    sess = _require_login(args.db)
     session = _get_session(args.db)
-    user = _get_or_create_user(session, args.user)
+    user = _get_current_user(session, sess.user)
     repo = SqliteRecordRepository(session)
     svc = RecordService(repo)
     records = load_records_from_csv(args.path)
@@ -316,21 +356,19 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
         )
         svc.create_record(r)
         count += 1
-    print(f"imported {count} records for user {args.user}")
+    print(f"imported {count} records for user {user.name}")
 
 
 def cmd_export_csv(args: argparse.Namespace) -> None:
-    if save_records_to_csv is None:
-        raise SystemExit("csv io module not found. Please implement utils/csv_io.py")
+    sess = _require_login(args.db)
     session = _get_session(args.db)
+    user = _get_current_user(session, sess.user)
     year, month = _parse_month(args.month) if args.month else (None, None)
-    user = _get_or_create_user(session, args.user)
     repo = SqliteRecordRepository(session)
     svc = RecordService(repo)
     if year and month:
         recs = list(svc.list_month(user.user_id, year, month))
     else:
-        # fallback to a very wide range
         recs = list(
             repo.list_by_period(user.user_id, date(1900, 1, 1), date(3000, 1, 1))
         )
@@ -339,23 +377,55 @@ def cmd_export_csv(args: argparse.Namespace) -> None:
     print(f"exported {len(recs)} records to {args.path}")
 
 
+def cmd_init_db(args: argparse.Namespace) -> None:
+    init_db(db_url=args.db)
+    print(f"Initialized database at {args.db}")
+
+
 # ---------- main ----------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ledger CLI")
-    parser.add_argument(
+    # 公共父解析器：让 --db 对所有子命令可见（写在子命令前后都行）
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--db",
         default="sqlite:///./ledger.db",
-        help="SQLAlchemy DB URL (default sqlite:///./ledger.db)",
+        help="SQLAlchemy DB URL (e.g. sqlite:///./ledger.db)",
     )
+
+    parser = argparse.ArgumentParser(description="Ledger CLI (with login)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # init
-    p_init = sub.add_parser("init-db", help="Create tables if not exist")
+    p_init = sub.add_parser(
+        "init-db", help="Create tables if not exist", parents=[common]
+    )
     p_init.set_defaults(func=cmd_init_db)
 
+    # auth
+    p_reg = sub.add_parser("register", help="Register a new user", parents=[common])
+    p_reg.add_argument("--username", required=True)
+    p_reg.add_argument("--password", required=True)
+    p_reg.add_argument("--email", required=False, default=None)
+    p_reg.set_defaults(func=cmd_register)
+
+    p_login = sub.add_parser("login", help="Login and store session", parents=[common])
+    p_login.add_argument("--username", required=True)
+    p_login.add_argument("--password", required=True)
+    p_login.set_defaults(func=cmd_login)
+
+    p_logout = sub.add_parser("logout", help="Clear local session", parents=[common])
+    p_logout.set_defaults(func=cmd_logout)
+
+    p_who = sub.add_parser("whoami", help="Show current session", parents=[common])
+    p_who.set_defaults(func=cmd_whoami)
+
+    p_cp = sub.add_parser("change-password", help="Change password", parents=[common])
+    p_cp.add_argument("--old", required=True)
+    p_cp.add_argument("--new", required=True)
+    p_cp.set_defaults(func=cmd_change_password)
+
     # record
-    p_add = sub.add_parser("add", help="Add a record")
-    p_add.add_argument("--user", required=True)
+    p_add = sub.add_parser("add", help="Add a record", parents=[common])
     p_add.add_argument("--type", required=True, choices=[e.name for e in RecordType])
     p_add.add_argument("--category", required=True)
     p_add.add_argument("--amount", required=True, type=float)
@@ -363,16 +433,16 @@ def main() -> None:
     p_add.add_argument("--note", default="")
     p_add.set_defaults(func=cmd_add)
 
-    p_list = sub.add_parser("list", help="List records for a month")
-    p_list.add_argument("--user", required=True)
+    p_list = sub.add_parser("list", help="List records for a month", parents=[common])
     p_list.add_argument("--month", required=True, help="YYYY-MM")
     p_list.set_defaults(func=cmd_list)
 
-    p_stats = sub.add_parser("stats", help="Show monthly summary and (optionally) plot")
-    p_stats.add_argument("--user", required=True)
+    p_stats = sub.add_parser(
+        "stats", help="Show monthly summary/plot", parents=[common]
+    )
     p_stats.add_argument("--month", required=True, help="YYYY-MM")
     p_stats.add_argument(
-        "--plot", action="store_true", help="Save a category pie chart under reports/"
+        "--plot", action="store_true", help="Save a category pie chart to reports/"
     )
     p_stats.add_argument(
         "--reports-dir", default="reports", help="Output folder for charts"
@@ -380,30 +450,26 @@ def main() -> None:
     p_stats.set_defaults(func=cmd_stats)
 
     # budgets
-    p_budget = sub.add_parser("budget", help="Manage budgets")
+    p_budget = sub.add_parser("budget", help="Manage budgets", parents=[common])
     bsub = p_budget.add_subparsers(dest="bcommand", required=True)
 
-    b_set = bsub.add_parser("set", help="Set or update a budget for a category")
-    b_set.add_argument("--user", required=True)
+    b_set = bsub.add_parser("set", help="Set/update a budget", parents=[common])
     b_set.add_argument("--category", required=True)
     b_set.add_argument("--limit", required=True, type=float)
     b_set.set_defaults(func=cmd_budget_set)
 
-    b_list = bsub.add_parser("list", help="List budgets")
-    b_list.add_argument("--user", required=True)
+    b_list = bsub.add_parser("list", help="List budgets", parents=[common])
     b_list.set_defaults(func=cmd_budget_list)
 
-    b_prog = bsub.add_parser("progress", help="Show monthly progress against budgets")
-    b_prog.add_argument("--user", required=True)
+    b_prog = bsub.add_parser("progress", help="Show budget progress", parents=[common])
     b_prog.add_argument("--month", required=True, help="YYYY-MM")
     b_prog.set_defaults(func=cmd_budget_progress)
 
     # reminders
-    p_rem = sub.add_parser("reminder", help="Manage reminders")
+    p_rem = sub.add_parser("reminder", help="Manage reminders", parents=[common])
     rsub = p_rem.add_subparsers(dest="rcommand", required=True)
 
-    r_set = rsub.add_parser("set", help="Add a reminder")
-    r_set.add_argument("--user", required=True)
+    r_set = rsub.add_parser("set", help="Add a reminder", parents=[common])
     r_set.add_argument("--time", required=True, help="HH:MM (24h)")
     r_set.add_argument("--message", required=False, default="记账提醒")
     g = r_set.add_mutually_exclusive_group()
@@ -411,26 +477,22 @@ def main() -> None:
     g.add_argument("--disable", action="store_true", help="disable")
     r_set.set_defaults(func=cmd_reminder_set)
 
-    r_list = rsub.add_parser("list", help="List reminders")
-    r_list.add_argument("--user", required=True)
+    r_list = rsub.add_parser("list", help="List reminders", parents=[common])
     r_list.set_defaults(func=cmd_reminder_list)
 
-    r_emit = rsub.add_parser("emit", help="Emit enabled reminders to console")
-    r_emit.add_argument("--user", required=True)
+    r_emit = rsub.add_parser("emit", help="Emit enabled reminders", parents=[common])
     r_emit.set_defaults(func=cmd_reminder_emit)
 
     # CSV
-    p_imp = sub.add_parser("import-csv", help="Import records from CSV into a user")
-    p_imp.add_argument("--user", required=True)
+    p_imp = sub.add_parser(
+        "import-csv", help="Import records from CSV", parents=[common]
+    )
     p_imp.add_argument("--path", required=True)
     p_imp.set_defaults(func=cmd_import_csv)
 
-    p_exp = sub.add_parser(
-        "export-csv", help="Export records to CSV (optionally for a month)"
-    )
-    p_exp.add_argument("--user", required=True)
+    p_exp = sub.add_parser("export-csv", help="Export records to CSV", parents=[common])
     p_exp.add_argument("--path", required=True)
-    p_exp.add_argument("--month", required=False, help="YYYY-MM (optional) ")
+    p_exp.add_argument("--month", required=False, help="YYYY-MM (optional)")
     p_exp.set_defaults(func=cmd_export_csv)
 
     args = parser.parse_args()

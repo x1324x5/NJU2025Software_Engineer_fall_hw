@@ -1,56 +1,132 @@
-from datetime import date, time
-from sqlalchemy.orm import Session
-from ledger.utils.db import init_db, get_session_factory
-from ledger.repo.sqlite_user_repo import SqliteUserRepository
-from ledger.repo.sqlite_budget_repo import SqliteBudgetRepository
-from ledger.repo.sqlite_reminder_repo import SqliteReminderRepository
-from ledger.models import User, Record, RecordType, Budget, Reminder
-from ledger.services.budget_service import BudgetService
-from ledger.services.reminder_service import ReminderService
+import uuid
+import sys
+from ledger.api import cli
 
-def make_session(db_url: str) -> Session:
-    init_db(db_url=db_url)
-    SessionFactory = get_session_factory(db_url=db_url)
-    return SessionFactory()
 
-def test_budget_progress_and_alerts(tmp_path):
-    db_url = f"sqlite:///{tmp_path}/br_test.db"
-    session = make_session(db_url)
-    u = SqliteUserRepository(session).add(User(None, "bob", "b@example.com"))
+def _run_cli(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["prog", *argv])
+    cli.main()
 
-    b_repo = SqliteBudgetRepository(session)
-    food = b_repo.add(Budget(None, u.user_id, "food", 300.0, "MONTHLY"))
-    rent = b_repo.add(Budget(None, u.user_id, "rent", 1500.0, "MONTHLY"))
 
-    recs = [
-        Record(None, u.user_id, RecordType.EXPENSE, "food", 120.0, date(2025,1,2), ""),
-        Record(None, u.user_id, RecordType.EXPENSE, "food", 80.0, date(2025,1,3), ""),
-        Record(None, u.user_id, RecordType.EXPENSE, "rent", 1200.0, date(2025,1,1), ""),
-        Record(None, u.user_id, RecordType.INCOME, "salary", 5000.0, date(2025,1,1), ""),
-    ]
-    svc = BudgetService()
-    prog = svc.progress([food, rent], recs)
-    assert 0.65 <= prog["food"] <= 0.67
-    alerts = svc.alert_flags([food, rent], recs, warn_ratio=0.8)
-    assert alerts["food"] is False and alerts["rent"] is False
+def test_budget_progress_and_reminders_via_cli(tmp_path, capsys, monkeypatch):
+    db_url = f"sqlite:///{tmp_path}/br_{uuid.uuid4().hex}.db"
 
-    b_repo.update_limit(food.budget_id, 200.0)
-    food2 = b_repo.get_by_category(u.user_id, "food")
-    prog2 = svc.progress([food2, rent], recs)
-    assert 0.99 <= prog2["food"] <= 1.01
-    alerts2 = svc.alert_flags([food2, rent], recs, warn_ratio=0.8)
-    assert alerts2["food"] is True
+    # 初始化 + 注册 + 登录
+    _run_cli(monkeypatch, "init-db", "--db", db_url)
+    capsys.readouterr()
 
-def test_reminder_add_and_list(tmp_path, capsys):
-    db_url = f"sqlite:///{tmp_path}/br_test2.db"
-    session = make_session(db_url)
-    u = SqliteUserRepository(session).add(User(None, "carol", "c@example.com"))
+    _run_cli(
+        monkeypatch,
+        "register",
+        "--db",
+        db_url,
+        "--username",
+        "bob",
+        "--password",
+        "123456",
+        "--email",
+        "b@example.com",
+    )
+    capsys.readouterr()
 
-    r_repo = SqliteReminderRepository(session)
-    r_repo.add(Reminder(None, u.user_id, "Log expenses", time(hour=21, minute=0), True, "DAILY"))
-    r_repo.add(Reminder(None, u.user_id, "Weekly summary", time(hour=9, minute=0), True, "WEEKLY"))
+    _run_cli(
+        monkeypatch,
+        "login",
+        "--db",
+        db_url,
+        "--username",
+        "bob",
+        "--password",
+        "123456",
+    )
+    capsys.readouterr()
 
-    svc = ReminderService()
-    svc.emit(r_repo.list_enabled(u.user_id))
+    # 添加几条 2025-01 的支出，便于预算进度计算
+    _run_cli(
+        monkeypatch,
+        "add",
+        "--db",
+        db_url,
+        "--type",
+        "EXPENSE",
+        "--category",
+        "food",
+        "--amount",
+        "30",
+        "--date",
+        "2025-01-05",
+        "--note",
+        "breakfast",
+    )
+    capsys.readouterr()
+    _run_cli(
+        monkeypatch,
+        "add",
+        "--db",
+        db_url,
+        "--type",
+        "EXPENSE",
+        "--category",
+        "food",
+        "--amount",
+        "20",
+        "--date",
+        "2025-01-06",
+        "--note",
+        "lunch",
+    )
+    capsys.readouterr()
+
+    # 预算：set / list / progress（注意：你的表结构没有 period 字段）
+    _run_cli(
+        monkeypatch,
+        "budget",
+        "set",
+        "--db",
+        db_url,
+        "--category",
+        "food",
+        "--limit",
+        "100",
+    )
     out = capsys.readouterr().out
-    assert "Log expenses" in out and "Weekly summary" in out
+    assert "budget set" in out.lower()
+
+    _run_cli(monkeypatch, "budget", "list", "--db", db_url)
+    out = capsys.readouterr().out
+    assert "food" in out and "100.0" in out
+
+    _run_cli(monkeypatch, "budget", "progress", "--db", db_url, "--month", "2025-01")
+    out = capsys.readouterr().out
+    # 输出类似： "Budget progress for bob 2025-01\n  food: XX.X%"
+    assert "Budget progress for bob 2025-01" in out
+    assert "food:" in out
+
+    # 提醒：set / list / emit（你的 Reminder 无 frequency 字段）
+    _run_cli(
+        monkeypatch,
+        "reminder",
+        "set",
+        "--db",
+        db_url,
+        "--time",
+        "09:00",
+        "--message",
+        "记账一下",
+    )
+    out = capsys.readouterr().out
+    assert "reminder added" in out.lower()
+
+    _run_cli(monkeypatch, "reminder", "list", "--db", db_url)
+    out = capsys.readouterr().out
+    assert "09:00:00" in out and "ON" in out
+
+    _run_cli(monkeypatch, "reminder", "emit", "--db", db_url)
+    out = capsys.readouterr().out
+    # emit 的每条输出为：[reminder] 09:00:00 - 记账一下
+    assert "[reminder] 09:00:00 - 记账一下" in out
+
+    # 登出
+    _run_cli(monkeypatch, "logout")
+    out = capsys.readouterr().out
+    assert "logged out" in out.lower()

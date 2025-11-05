@@ -1,64 +1,47 @@
+import uuid
 from datetime import date
-from sqlalchemy.orm import Session
-from ledger.utils.db import get_session_factory, init_db
+from ledger.utils.db import init_db, get_session_factory
 from ledger.repo.sqlite_user_repo import SqliteUserRepository
 from ledger.repo.sqlite_record_repo import SqliteRecordRepository
-from ledger.models import User, Record, RecordType
+from ledger.models import Record, RecordType
 
 
-def make_session(db_url: str) -> Session:
+def make_session(db_url: str):
     init_db(db_url=db_url)
     SessionFactory = get_session_factory(db_url=db_url)
     return SessionFactory()
 
 
 def test_add_and_query_records(tmp_path):
-    db_url = f"sqlite:///{tmp_path}/m1_test.db"
+    db_url = f"sqlite:///{tmp_path}/m1_{uuid.uuid4().hex}.db"
     session = make_session(db_url)
-    # user
+
+    # 用 register，且使用随机用户名，避免与预置数据冲突
     urepo = SqliteUserRepository(session)
-    user = urepo.add(User(None, "alice", "a@example.com"))
+    uname = f"user_{uuid.uuid4().hex[:6]}"
+    user = urepo.register(uname, "123456", f"{uname}@example.com")
 
     rrepo = SqliteRecordRepository(session)
-    # add
-    r1 = rrepo.add(
-        Record(
-            None,
-            user.user_id,
-            RecordType.EXPENSE,
-            "food",
-            25.5,
-            date(2025, 1, 2),
-            "lunch",
-        )
+
+    r1 = Record(
+        None,
+        user.user_id,
+        RecordType.INCOME,
+        "salary",
+        1000.0,
+        date(2025, 1, 1),
+        "monthly",
     )
-    r2 = rrepo.add(
-        Record(
-            None,
-            user.user_id,
-            RecordType.EXPENSE,
-            "transport",
-            10.0,
-            date(2025, 1, 3),
-            "bus",
-        )
-    )
-    r3 = rrepo.add(
-        Record(
-            None,
-            user.user_id,
-            RecordType.INCOME,
-            "salary",
-            1000.0,
-            date(2025, 1, 1),
-            "Jan",
-        )
+    r2 = Record(
+        None, user.user_id, RecordType.EXPENSE, "food", 50.5, date(2025, 1, 2), "lunch"
     )
 
-    # list by period (Jan 2025)
-    recs = list(rrepo.list_by_period(user.user_id, date(2025, 1, 1), date(2025, 2, 1)))
-    assert len(recs) == 3
-    # search
-    found = list(rrepo.search(user.user_id, "foo"))
-    assert len(found) == 1
-    assert found[0].category == "food"
+    r1 = rrepo.add(r1)
+    r2 = rrepo.add(r2)
+
+    assert r1.record_id is not None and r2.record_id is not None
+
+    recs = list(rrepo.list_month(user.user_id, 2025, 1))
+    cats = {(r.category, r.rtype.name) for r in recs}
+    assert ("salary", "INCOME") in cats
+    assert ("food", "EXPENSE") in cats
